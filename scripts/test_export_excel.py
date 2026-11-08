@@ -170,8 +170,10 @@ class ExportTests(unittest.TestCase):
         data = fixture()
         data["run"]["city_priority_order"] = []
         data["run"]["priority_order"] = ["优先"]
+        for job in data["jobs"]:
+            job["city_priority"] = ""
         for job in data["jobs"][:2]:
-            job.update(priority="优先", city_priority="")
+            job["priority"] = "优先"
         validate(data)
 
     def test_status_evidence_and_timezone_required(self):
@@ -269,14 +271,102 @@ class ExportTests(unittest.TestCase):
             wb = load_workbook(path)
             try:
                 rows = records(wb[SHEETS[1]])
-                self.assertEqual([r["主优先级"] for r in rows[:3]], ["T0", "T0", "T1"])
-                self.assertEqual([r["城市子优先级"] for r in rows[:2]], ["T0", "T1"])
+                self.assertEqual([r["岗位优先级"] for r in rows[:3]], ["T0", "T0", "T1"])
+                self.assertEqual([r["城市优先级"] for r in rows[:2]], ["T0", "T1"])
                 self.assertEqual(rows[3]["筛选结果"], "待核实")
             finally:
                 wb.close()
         pending["priority"] = "T0"
         with self.assertRaisesRegex(ValueError, "不能携带优先级"):
             validate(data)
+
+    def test_city_rank_is_independent_for_excluded_and_pending_jobs(self):
+        data = fixture()
+        pending = copy.deepcopy(data["jobs"][0])
+        pending.update(row_id="unknown-direction", job_key="unknown-direction", result="待核实", priority="",
+                       city="西宁", city_priority="T3", uncertainties="名称宽泛，方向无法确定")
+        data["jobs"].append(pending)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "independent.xlsx"
+            export_audit(data, path)
+            wb = load_workbook(path)
+            try:
+                by_id = {r["城市记录ID"]: r for r in records(wb[SHEETS[1]])}
+                self.assertEqual(by_id["example-b-image"]["筛选结果"], "排除")
+                self.assertEqual(by_id["example-b-image"]["城市优先级"], "T3")
+                self.assertEqual(by_id["unknown-direction"]["城市优先级"], "T3")
+                self.assertIsNone(by_id["unknown-direction"]["岗位优先级"])
+            finally:
+                wb.close()
+
+    def test_job_t0_city_t3_remains_a_candidate(self):
+        data = fixture()
+        data["jobs"][0].update(city="北京", city_priority="T3")
+        data["jobs"][1].update(city="杭州", city_priority="T0")
+        self.assertEqual(theoretical_max(data["companies"][0], validate(data)["example-a"]), 1)
+        self.assertEqual(data["jobs"][0]["priority"], "T0")
+
+    def test_personal_unknowns_are_not_blanket_blocking_reviews(self):
+        data = fixture()
+        from export_excel import build_rows
+        rows = build_rows(data, validate(data))[2][1]
+        self.assertFalse(any(r[0] == "岗位阻断复核" for r in rows))
+        notices = [r for r in rows if r[0] == "个人资格提示"]
+        self.assertEqual(len(notices), 1)  # One unit, one true job identity, not both cities or excluded jobs.
+        self.assertIn("1 个", notices[0][4])
+        self.assertEqual(notices[0][-1], "否")
+
+    def test_title_only_judgment_does_not_require_full_jd(self):
+        data = fixture()
+        for job in data["jobs"][:2]:
+            job.update(name="Java开发（虚构）", priority="T2", duties="", requirements="", majors="",
+                       rationale="名称明确为Java开发，依据当前规则归T2；未读取完整JD。",
+                       classification_basis="岗位名称", classification_confidence="中")
+        from export_excel import build_rows
+        rows = build_rows(data, validate(data))
+        header = rows[1][0]
+        self.assertEqual(rows[1][1][0][header.index("判断依据类型")], "岗位名称")
+        self.assertEqual(rows[1][1][0][header.index("判断置信度")], "中")
+        self.assertFalse(any(r[0] == "岗位阻断复核" for r in rows[2][1]))
+
+    def test_known_direction_with_real_gate_retains_rank_but_not_candidate(self):
+        data = fixture()
+        for job in data["jobs"][:2]:
+            job.update(result="待核实", direction_result="纳入", blocking_issues="方向明确，但是否为正式校招尚不明",
+                       uncertainties="招聘类型待确认", priority="T0")
+        grouped = validate(data)
+        self.assertEqual(theoretical_max(data["companies"][0], grouped["example-a"]), 0)
+        from export_excel import build_rows
+        tables = build_rows(data, grouped)
+        blockers = [r for r in tables[2][1] if r[0] == "岗位阻断复核"]
+        self.assertEqual(len(blockers), 1)  # Duplicate city copies of the same issue are not duplicate reviews.
+        self.assertEqual(blockers[0][-1], "是")
+        self.assertEqual(tables[1][1][0][11], "T0")
+        data["jobs"][0]["blocking_issues"] = ""
+        with self.assertRaisesRegex(ValueError, "blocking_issues"):
+            validate(data)
+
+    def test_pending_known_high_rank_not_promoted_ahead_of_accepted(self):
+        data = fixture()
+        high = copy.deepcopy(data["jobs"][0])
+        high.update(row_id="high-pending", job_key="high-pending", result="待核实", direction_result="纳入",
+                    priority="T0", blocking_issues="招聘类型不明确", uncertainties="招聘类型不明确")
+        for job in data["jobs"][:2]:
+            job["priority"] = "T2"
+        data["jobs"].append(high)
+        from export_excel import build_rows
+        rows = build_rows(data, validate(data))[1][1]
+        self.assertEqual([r[10] for r in rows[:3]], ["纳入", "纳入", "待核实"])
+
+    def test_city_only_unknown_is_nonblocking(self):
+        data = fixture()
+        data["jobs"][0].update(city="待核实", city_priority="待核实", uncertainties="实际工作地点未提供")
+        from export_excel import build_rows
+        tables = build_rows(data, validate(data))
+        self.assertFalse(any(r[0] == "岗位阻断复核" for r in tables[2][1]))
+        notes = [r for r in tables[2][1] if r[0] == "非阻断补充"]
+        self.assertTrue(notes)
+        self.assertTrue(all(r[-1] == "否" for r in notes))
 
     def test_cli_round_trip_and_rule_hash_guard(self):
         with tempfile.TemporaryDirectory() as directory:

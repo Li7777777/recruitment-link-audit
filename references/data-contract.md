@@ -40,7 +40,7 @@ JSON 顶层必须有 `run`（对象）、`companies`（数组）、`jobs`（数�
 | rules_sha256 | 必填，64 位十六进制 SHA-256 |
 | checked_at | 必填，本次范围核验时间，含时区 |
 | priority_order | 必填字符串数组，从高到低，按本次规则，如 ["T0","T1","T2","T3"]；不是脚本内置等级 |
-| city_priority_order | 必填字符串数组，按本次规则，如 ["T0","T1"]；规则不设城市等级时为 [] |
+| city_priority_order | 必填字符串数组，独立城市等级从高到低；随附规则为 ["T0","T1","T3"]，不设置城市T2；其他规则按其定义，未设城市等级时为 [] |
 | notes | 可选，本轮限制/快照路径等 |
 
 `source_record_ids` 必须恰好等于所有 company.source_record_ids 与 ignored_records.record_id 的并集。可一源行展开多个单位，但不能把同一行同时映射和忽略，不能混入范围外行。只存在于用户单位名单而源表未找到的单位可用空来源 ID。
@@ -121,7 +121,7 @@ status 为在招/部分在招，至少有一条该单位的 job.status=在招；
 - `city`：实际城市；未知写“待核实”，多城市按城市拆行。相同 company_id+job_key+city 不得重复。
 - `status`：在招 / 已停止 / 暂未开放 / 待核实。
 - `result`：纳入 / 排除 / 不纳入 / 待核实。
-- `rationale`：本次规则对应的关键职责/要求/专业原文与判定理由。待核实也需说明证据缺口。
+- `rationale`：本次规则对应的岗位名称/职责/专业等原文与判定理由。明确名称可以直判，不强制完整JD；待核实需说明真正会改变结论的证据缺口。
 - `eligibility`：符合已知条件 / 不符 / 待核实 / 未评估；未知不能写符合。
 - `source_url`：岗位详情/本轮岗位公告等证据 URL。
 - `checked_at`：实际岗位核验时间。
@@ -129,16 +129,23 @@ status 为在招/部分在招，至少有一条该单位的 job.status=在招；
 有条件必填：
 
 - status 非待核实：`status_evidence` + `status_source_url`，说明当前是否开放及依据。
-- result=纳入：`priority` 必须存在于 run.priority_order；`city_priority` 存在于 run.city_priority_order 或为“待核实”。若规则无城市等级，city_priority=""。
-- result=排除：`blacklist_reason` 必填，具体排除条件；priority/city_priority 留空。
-- result=不纳入：priority/city_priority 留空，rationale 解释为何未匹配。
-- result=待核实：priority/city_priority 留空，不把主分类或黑名单尚不确定的岗位排进推荐等级。
-- result=待核实、status=待核实或 city_priority=待核实：`uncertainties` 必填。仅城市未知而主等级确认时，result 仍为纳入。
+- `direction_result` 可选，取纳入/排除/不纳入/待核实；未提供时兼容旧数据，等于result。它描述方向，result描述最终筛选。
+- direction_result=纳入：`priority` 必须存在于run.priority_order；方向未匹配/未知时priority留空。最终result=纳入必须有匹配方向。
+- 最终result=待核实但direction_result=纳入时，保留priority，必须填写`blocking_issues`解释真实门槛，如正式校招类型未明。这类岗位仍不计候选，并排在最终纳入之后。
+- result=排除：`blacklist_reason`必填，说明黑名单或招聘类型等范围排除原因。方向等级通常留空；若显式direction_result=纳入（例如Agent实习因招聘类型排除），可保留已知方向等级，但不计候选。
+- **所有筛选结果都可独立填写city_priority**，不因方向待核实/排除/不纳入而清空；值应来自run.city_priority_order或“待核实”。规则无城市等级时为""。旧JSON的空城市等级兼容读取并生成非阻断补充提示，新任务应逐行独立评级。
+- result=待核实或status=待核实：`uncertainties`或`blocking_issues`至少有一项具体说明。
+- city_priority=待核实时，uncertainties/nonblocking_notes/blocking_issues至少一项说明地点缺失；仅地点未知不改变已确认方向，也不自动进入阻断复核。
 
 其他可选字段（建议尽可能依据原文填充，不得猜）：
 
 | 字段 | 含义 |
 | --- | --- |
+| direction_result | 方向判断，未提供时等于result；仅明确匹配方向才有岗位priority |
+| classification_basis | 岗位名称 / 岗位职责 / 招聘专业 / 综合；名称直判要如实填写 |
+| classification_confidence | 高 / 中 / 低；不是自动复核开关，名称直判通常为中 |
+| blocking_issues | 真实影响最终筛选/当前可投性的阻断事项，字符串；方向已知但最终待核实时必填 |
+| nonblocking_notes | 非阻断补充信息，如仅缺完整JD/地点、未确认更高等级等；不逐项自动标红 |
 | job_id | 官网岗位/志愿 ID，保留原值；无则空 |
 | department | 部门或子单位 |
 | batch | 招聘轮次/届次，不同轮次不得混淆 |
@@ -176,11 +183,12 @@ status 为在招/部分在招，至少有一条该单位的 job.status=在招；
 
 category/item/value 必填非空字符串，其余可选；关联 ID 若填写必须真实存在。checked_at 未提供则按 run.checked_at，只有确实同次核验的事项才可省略。
 
-脚本还会自动加入：范围和规则元信息、完整性警告、源行忽略原因、统计口径、缺失/复杂限投、岗位待核实事项。附加原始证据、申请步骤、笔面试、附件清单等由 Agent 补充。不要只依赖自动生成行而漏掉浏览时看到的重要信息。
+脚本自动加入：范围和规则元信息、完整性警告、源行忽略原因、统计口径、缺失/复杂限投，以及按真实投递身份和具体问题去重的岗位阻断复核。个人资格未评估只对匹配在招候选按单位汇总为非阻断提示；城市缺失、名称直判或其他补充说明不自动标“需复核”。原uncertainties仍在岗位表完整展示，但非空本身不触发复核。附加证据/流程等由Agent补充，显式other_info.needs_review也应遵循阻断口径，不能机械标全部为true。
 
 ## 6. 数量和汇总行为
 
-- 总岗位数按 `(company_id, job_key)` 去重；多城市行另列数量。
+- 总岗位数按 `(company_id, job_key)` 去重；多城市行另列数量。岗位与城市评级独立，城市T3不自动排除、不减少候选，也不等于岗位T3。
+- 默认排序先按最终筛选结果（纳入→待核实→不纳入→排除），再按岗位和城市两套顺序辅助展示；评级本身不依赖该排序，不合成单一总等级。
 - “筛选匹配在招岗位数”要求 result=纳入、status=在招、eligibility≠不符。
 - “其中资格已确认数”进一步要求 eligibility=符合已知条件，仍不保证账户名额或投递成功。
 - 理论可投上限仅在单位 coverage=完整时考虑：候选数为0则按筛选记0；存在共享/复杂约束则给文字提醒；额度未知/冲突则给“未核实”；独立明确额度才用 min；明确不限才用候选数。

@@ -29,6 +29,8 @@ COMPANY_STATUSES = JOB_STATUSES | {"部分在招", "当前无岗位"}
 COVERAGES = {"完整", "部分", "受阻", "未找到"}
 ELIGIBILITIES = {"符合已知条件", "不符", "待核实", "未评估"}
 QUOTA_STATUSES = {"已确认", "未核实", "冲突"}
+CLASSIFICATION_BASES = {"岗位名称", "岗位职责", "招聘专业", "综合"}
+CONFIDENCES = {"高", "中", "低"}
 BAD_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 COLORS = {"纳入": "E2F0D9", "排除": "FCE4D6", "不纳入": "E7E6E6", "待核实": "FFF2CC"}
 
@@ -155,16 +157,33 @@ def validate(data):
         check_url(job.get("deadline_source_url"), f"{jid}.deadline_source_url")
         if job["status"] != "待核实":
             nonempty(job, ["status_evidence"], jid)
-        if job["result"] == "纳入":
-            require(job.get("priority") in run["priority_order"], f"{jid}: 纳入岗位缺少规则定义的主优先级")
-            city_values = run["city_priority_order"] + ["待核实"] if run["city_priority_order"] else [""]
-            require(job.get("city_priority", "") in city_values, f"{jid}: 城市优先级无效")
+        # Direction, final screening, city, and eligibility are separate dimensions.
+        direction = job.get("direction_result", job["result"])
+        require(direction in RESULTS, f"{jid}: 无效 direction_result")
+        if direction == "纳入":
+            require(job.get("priority") in run["priority_order"], f"{jid}: 方向纳入岗位缺少规则定义的岗位优先级")
         else:
-            require(not job.get("priority") and not job.get("city_priority"), f"{jid}: 排除/不纳入/主分类待核实不能携带优先级")
+            require(not job.get("priority"), f"{jid}: 方向未匹配时不能携带优先级")
+        if job["result"] == "纳入":
+            require(direction == "纳入", f"{jid}: 最终纳入必须有已匹配的方向")
+        if job["result"] == "待核实" and direction == "纳入":
+            nonempty(job, ["blocking_issues"], jid)
+        # Empty city rank is accepted for legacy data, never required by exclusion.
+        city_values = run["city_priority_order"] + ["待核实", ""] if run["city_priority_order"] else [""]
+        require(job.get("city_priority", "") in city_values, f"{jid}: 城市优先级无效")
+        for field in ["blocking_issues", "nonblocking_notes"]:
+            require(isinstance(job.get(field, ""), str), f"{jid}.{field}: 应为字符串")
+        if job.get("classification_basis"):
+            require(job["classification_basis"] in CLASSIFICATION_BASES, f"{jid}: 无效 classification_basis")
+        if job.get("classification_confidence"):
+            require(job["classification_confidence"] in CONFIDENCES, f"{jid}: 无效 classification_confidence")
         if job["result"] == "排除":
             nonempty(job, ["blacklist_reason"], jid)
-        if job["result"] == "待核实" or job.get("city_priority") == "待核实" or job["status"] == "待核实":
-            nonempty(job, ["uncertainties"], jid)
+        if job["result"] == "待核实" or job["status"] == "待核实":
+            require(bool(job.get("uncertainties") or job.get("blocking_issues")), f"{jid}: 待核实必须说明具体阻断事项")
+        if job.get("city_priority") == "待核实":
+            require(bool(job.get("uncertainties") or job.get("nonblocking_notes") or job.get("blocking_issues")),
+                    f"{jid}: 地点待核实需有说明，但不改变方向结论")
     for cid, company in companies.items():
         active = any(j["status"] == "在招" for j in grouped[cid])
         if company["status"] in {"已停止", "当前无岗位", "暂未开放"}:
@@ -268,20 +287,25 @@ def build_rows(data, grouped):
                          company.get("source_url", ""), "; ".join(company["source_record_ids"]), company["checked_at"], company.get("notes", "")])
     job_fields = [("row_id", "城市记录ID"), ("company_id", "单位ID"), ("company_name", "单位名称"), ("job_key", "独立投递身份"),
                   ("job_id", "官方岗位ID"), ("name", "岗位名称"), ("department", "部门/子单位"), ("batch", "招聘批次"), ("city", "工作城市"),
-                  ("status", "岗位状态"), ("result", "筛选结果"), ("priority", "主优先级"), ("city_priority", "城市子优先级"),
-                  ("rationale", "筛选原文依据"), ("blacklist_reason", "黑名单原因"), ("uncertainties", "待核实事项"),
+                  ("status", "岗位状态"), ("result", "筛选结果"), ("priority", "岗位优先级"), ("city_priority", "城市优先级"),
+                  ("rationale", "筛选原文依据"), ("blacklist_reason", "排除原因"), ("uncertainties", "待核实事项"),
                   ("duties", "岗位职责"), ("requirements", "任职要求"), ("majors", "招聘专业"), ("education", "学历要求"),
                   ("graduation", "届次要求"), ("eligibility", "个人资格核验"), ("headcount", "招聘人数(非限投数)"),
                   ("deadline", "截止时间"), ("deadline_basis", "截止时间依据/时区"), ("deadline_source_url", "截止证据链接"),
                   ("application_url", "投递链接"), ("source_url", "岗位来源链接"), ("status_evidence", "岗位状态原文"),
-                  ("status_source_url", "岗位状态证据链接"), ("checked_at", "核验时间"), ("notes", "备注")]
+                  ("status_source_url", "岗位状态证据链接"), ("checked_at", "核验时间"), ("notes", "备注"),
+                  ("direction_result", "方向判断"), ("classification_basis", "判断依据类型"),
+                  ("classification_confidence", "判断置信度"), ("blocking_issues", "阻断事项"),
+                  ("nonblocking_notes", "非阻断补充说明")]
     priorities = {p: i for i, p in enumerate(run["priority_order"])}
     cities = {p: i for i, p in enumerate(run["city_priority_order"])}
     fallback = len(priorities)
     ordered = sorted(data["jobs"], key=lambda j: (
-        priorities.get(j.get("priority"), fallback + {"待核实": 0, "不纳入": 1, "排除": 2}.get(j["result"], 3)),
-        cities.get(j.get("city_priority"), len(cities)), companies[j["company_id"]]["name"], j["job_key"], j["city"]))
-    job_rows = [[companies[j["company_id"]]["name"] if key == "company_name" else j.get(key, "")
+        {"纳入": 0, "待核实": 1, "不纳入": 2, "排除": 3}[j["result"]],
+        priorities.get(j.get("priority"), fallback), cities.get(j.get("city_priority"), len(cities)),
+        companies[j["company_id"]]["name"], j["job_key"], j["city"]))
+    job_rows = [[companies[j["company_id"]]["name"] if key == "company_name" else
+                 j.get("direction_result", j["result"]) if key == "direction_result" else j.get(key, "")
                  for key, _ in job_fields] for j in ordered]
     info_headers = ["类别", "单位ID", "岗位投递身份", "事项", "内容", "来源链接", "原文/证据", "核验时间", "需复核"]
     info_rows = []
@@ -293,8 +317,8 @@ def build_rows(data, grouped):
                 and (run.get("source_expected_records") is None or run["source_expected_records"] == len(run["source_record_ids"])))
     info("运行元信息", "采集完整性", "完整采集（仍以待核实事项为准）" if complete else "部分完成：不得声称全量核验", review=not complete)
     for key, title in [("scope", "本次指定范围"), ("scope_verified", "视图/单位范围是否已核实"), ("scope_evidence", "范围核实依据"),
-                       ("rules_file", "实际读取的规则文件"), ("rules_sha256", "规则文件 SHA-256"), ("priority_order", "主优先级顺序"),
-                       ("city_priority_order", "城市子优先级顺序"), ("source_expected_records", "源视图预期记录数(非单位数)"),
+                       ("rules_file", "实际读取的规则文件"), ("rules_sha256", "规则文件 SHA-256"), ("priority_order", "岗位优先级顺序"),
+                       ("city_priority_order", "独立城市优先级顺序"), ("source_expected_records", "源视图预期记录数(非单位数)"),
                        ("notes", "运行说明")]:
         if key in run:
             value = json.dumps(run[key], ensure_ascii=False) if isinstance(run[key], list) else str(run[key])
@@ -316,10 +340,40 @@ def build_rows(data, grouped):
                  f"{quota['status']}；{quota.get('shared_scope_note', '')}；{quota.get('notes', '')}", cid,
                  url=quota.get("source_url", ""), quote=quota.get("raw_text", ""), checked_at=quota.get("checked_at"),
                  review=quota["status"] != "已确认" or bool(quota.get("shared_scope_id")))
+    info("复核口径", "阻断事项与补充信息分开", "仅真实筛选阻断、明确冲突或候选开放状态不明等标需复核；个人资料未提供、仅缺城市或名称直判尚无完整JD，不自动把岗位标待复核。方向与城市独立，城市低等级不代表排除。")
+    for company in data["companies"]:
+        cid = company["company_id"]
+        count = unique_count(grouped[cid], lambda j: candidate(j) and j["eligibility"] in {"待核实", "未评估"})
+        if count:
+            info("个人资格提示", "匹配候选的个人资格尚未评估", f"{count} 个独立匹配在招岗位尚需本人对照学历/届次等；这不改变已确定的方向，不逐岗位生成阻断复核。", cid)
+    legacy_city_count = sum(bool(run["city_priority_order"]) and not j.get("city_priority") for j in ordered)
+    if legacy_city_count:
+        info("非阻断补充", "旧数据缺少独立城市评级", f"{legacy_city_count} 条岗位城市记录未填写city_priority；保留原始地点，不从岗位等级代填，也不静默套用新规则。新任务需逐行独立评级。")
+    seen_issues = set()
     for job in ordered:
-        if job.get("uncertainties") or job["eligibility"] in {"待核实", "未评估"}:
-            info("岗位待复核", job["name"], (job.get("uncertainties") or "无其他筛选疑点") + f"；个人资格：{job['eligibility']}",
-                 job["company_id"], job["job_key"], job["source_url"], checked_at=job["checked_at"], review=True)
+        blocking = []
+        if job["result"] == "待核实":
+            blocking.append(job.get("blocking_issues") or job.get("uncertainties") or "筛选所需信息未确认")
+        elif job.get("blocking_issues"):
+            blocking.append(job["blocking_issues"])
+        if job["result"] in {"纳入", "待核实"} and job["status"] == "待核实":
+            blocking.append("岗位是否仍开放待核实")
+        issue = "；".join(dict.fromkeys(blocking))
+        signature = (job["company_id"], job["job_key"], issue)
+        if issue and signature not in seen_issues:
+            seen_issues.add(signature)
+            info("岗位阻断复核", job["name"], issue, job["company_id"], job["job_key"],
+                 job["source_url"], checked_at=job["checked_at"], review=True)
+        # Original uncertainties stay visible in the job table, not an all-purpose review flag.
+        note = job.get("nonblocking_notes", "")
+        if job.get("city_priority") == "待核实":
+            note = "实际工作地点待补充；已有岗位方向保留。" + note
+        signature = (job["company_id"], job["job_key"], note)
+        if note and signature not in seen_issues:
+            seen_issues.add(signature)
+            info("非阻断补充", job["name"], note, job["company_id"], job["job_key"],
+                 job["source_url"], checked_at=job["checked_at"])
+
     for item in data["other_info"]:
         info(item["category"], item["item"], item["value"], item.get("company_id", ""), item.get("job_key", ""),
              item.get("source_url", ""), item.get("quote", ""), item.get("checked_at"), item.get("needs_review", False))
