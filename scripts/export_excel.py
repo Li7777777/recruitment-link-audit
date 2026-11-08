@@ -1,0 +1,437 @@
+#!/usr/bin/env python3
+"""Validate an evidence-backed recruitment audit and export exactly three Excel sheets.
+
+This script does NOT browse, classify jobs, or infer employer application limits.
+Usage: python export_excel.py audit.json -o audit.xlsx [--overwrite]
+Dependency: openpyxl >= 3.1, < 4
+"""
+from __future__ import annotations
+
+import argparse
+from collections import defaultdict
+from datetime import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import tempfile
+from urllib.parse import urlsplit
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+SHEETS = ["所有单位总览", "所有单位岗位总表", "其他信息表"]
+RESULTS = {"纳入", "排除", "不纳入", "待核实"}
+JOB_STATUSES = {"在招", "已停止", "暂未开放", "待核实"}
+COMPANY_STATUSES = JOB_STATUSES | {"部分在招", "当前无岗位"}
+COVERAGES = {"完整", "部分", "受阻", "未找到"}
+ELIGIBILITIES = {"符合已知条件", "不符", "待核实", "未评估"}
+QUOTA_STATUSES = {"已确认", "未核实", "冲突"}
+BAD_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+COLORS = {"纳入": "E2F0D9", "排除": "FCE4D6", "不纳入": "E7E6E6", "待核实": "FFF2CC"}
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def nonempty(obj, keys, where):
+    for key in keys:
+        require(isinstance(obj.get(key), str) and bool(obj[key].strip()), f"{where}.{key}: 必须为非空字符串")
+
+
+def check_time(value, where):
+    require(isinstance(value, str), f"{where}: 应为带时区的 ISO 8601 时间")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"{where}: 无效时间 {value!r}") from None
+    require(parsed.utcoffset() is not None, f"{where}: 时间必须包含时区，例如 +08:00")
+
+
+def check_url(value, where, required=False):
+    if not value and not required:
+        return
+    require(isinstance(value, str), f"{where}: 应为 URL 字符串")
+    parsed = urlsplit(value)
+    require(parsed.scheme in {"https", "http"} and bool(parsed.hostname)
+            and not parsed.username and not parsed.password
+            and not any(c.isspace() for c in value), f"{where}: 只接受不含账号密码的 http(s) URL")
+
+
+def string_ids(values, where):
+    require(isinstance(values, list) and all(isinstance(v, str) and v.strip() for v in values),
+            f"{where}: 应为非空字符串组成的数组（数组可为空）")
+    require(len(values) == len(set(values)), f"{where}: 存在重复 ID")
+
+
+def validate(data):
+    require(isinstance(data, dict), "顶层必须为 JSON 对象")
+    for key, typ in [("run", dict), ("companies", list), ("jobs", list), ("other_info", list)]:
+        require(isinstance(data.get(key), typ), f"缺少或类型错误: {key}")
+    run = data["run"]
+    nonempty(run, ["scope", "scope_evidence", "rules_file", "rules_sha256", "checked_at"], "run")
+    check_url(run.get("source_url"), "run.source_url", True)
+    check_time(run["checked_at"], "run.checked_at")
+    require(type(run.get("scope_verified")) is bool, "run.scope_verified: 必须为布尔值")
+    require(re.fullmatch(r"[0-9a-fA-F]{64}", run["rules_sha256"]) is not None, "run.rules_sha256: 应为 SHA-256")
+    for field in ["priority_order", "city_priority_order", "source_record_ids"]:
+        string_ids(run.get(field), f"run.{field}")
+    expected = run.get("source_expected_records")
+    require(expected is None or (type(expected) is int and expected >= 0), "run.source_expected_records: 应为非负整数或 null")
+    ignored = run.get("ignored_records", [])
+    require(isinstance(ignored, list), "run.ignored_records: 应为数组")
+    for item in ignored:
+        require(isinstance(item, dict), "ignored_records 元素应为对象")
+        nonempty(item, ["record_id", "reason"], "ignored_records")
+    string_ids([i["record_id"] for i in ignored], "ignored_records.record_id")
+    ignored_ids = {i["record_id"] for i in ignored}
+    mapped = set(ignored_ids)
+    companies = {}
+    for company in data["companies"]:
+        require(isinstance(company, dict), "companies 元素应为对象")
+        nonempty(company, ["company_id", "name", "checked_at"], "company")
+        cid = company["company_id"]
+        require(cid not in companies, f"重复 company_id: {cid}")
+        companies[cid] = company
+        require(company.get("coverage") in COVERAGES, f"{cid}: 无效 coverage")
+        require(company.get("status") in COMPANY_STATUSES, f"{cid}: 无效 status")
+        check_time(company["checked_at"], f"{cid}.checked_at")
+        string_ids(company.get("source_record_ids"), f"{cid}.source_record_ids")
+        require(not ignored_ids.intersection(company["source_record_ids"]), f"{cid}: 已映射的源记录不能同时忽略")
+        mapped.update(company["source_record_ids"])
+        for field in ["source_url", "application_url", "status_source_url"]:
+            check_url(company.get(field), f"{cid}.{field}")
+        if company["status"] != "待核实":
+            nonempty(company, ["status_evidence"], cid)
+            check_url(company.get("status_source_url"), f"{cid}.status_source_url", True)
+        if company["coverage"] != "完整":
+            nonempty(company, ["notes"], cid)
+        quota = company.get("quota")
+        require(isinstance(quota, dict), f"{cid}.quota: 必须为对象，未知也必须记录")
+        require(quota.get("status") in QUOTA_STATUSES, f"{cid}.quota.status: 无效值")
+        maximum = quota.get("max_positions")
+        require(maximum is None or (type(maximum) is int and maximum >= 0), f"{cid}.quota.max_positions: 应为非负整数或 null")
+        require(type(quota.get("unlimited", False)) is bool, f"{cid}.quota.unlimited: 应为布尔值")
+        require(not (maximum is not None and quota.get("unlimited")), f"{cid}: 数值上限和无限制不能同时存在")
+        if quota["status"] == "已确认":
+            nonempty(quota, ["scope", "raw_text", "checked_at"], f"{cid}.quota")
+            check_url(quota.get("source_url"), f"{cid}.quota.source_url", True)
+            check_time(quota["checked_at"], f"{cid}.quota.checked_at")
+            require(maximum is not None or quota.get("unlimited") or quota.get("shared_scope_id"),
+                    f"{cid}: 确认的限投规则必须有单位数值上限、明确不限或共享/分层约束")
+        else:
+            require(maximum is None and not quota.get("unlimited"), f"{cid}: 未核实/冲突的限投规则不能填确定数值")
+        if quota.get("shared_scope_id"):
+            nonempty(quota, ["shared_scope_note"], f"{cid}.quota")
+        check_url(quota.get("source_url"), f"{cid}.quota.source_url")
+        if quota.get("checked_at"):
+            check_time(quota["checked_at"], f"{cid}.quota.checked_at")
+    require(mapped == set(run["source_record_ids"]), "源记录对账失败：每条源记录必须映射到单位或附理由忽略；不得多出范围外记录")
+    row_ids = set()
+    city_rows = set()
+    grouped = defaultdict(list)
+    for job in data["jobs"]:
+        require(isinstance(job, dict), "jobs 元素应为对象")
+        nonempty(job, ["row_id", "company_id", "job_key", "name", "city", "rationale", "checked_at"], "job")
+        jid = job["row_id"]
+        require(jid not in row_ids, f"重复 row_id: {jid}")
+        row_ids.add(jid)
+        require(job["company_id"] in companies, f"{jid}: 引用了不存在的单位")
+        city_key = (job["company_id"], job["job_key"], job["city"])
+        require(city_key not in city_rows, f"{jid}: 同一投递身份、城市重复，需先去重")
+        city_rows.add(city_key)
+        grouped[job["company_id"]].append(job)
+        require(job.get("status") in JOB_STATUSES, f"{jid}: 无效岗位 status")
+        require(job.get("result") in RESULTS, f"{jid}: 无效 result")
+        require(job.get("eligibility") in ELIGIBILITIES, f"{jid}: 无效 eligibility")
+        check_time(job["checked_at"], f"{jid}.checked_at")
+        check_url(job.get("source_url"), f"{jid}.source_url", True)
+        check_url(job.get("application_url"), f"{jid}.application_url")
+        check_url(job.get("status_source_url"), f"{jid}.status_source_url", job["status"] != "待核实")
+        check_url(job.get("deadline_source_url"), f"{jid}.deadline_source_url")
+        if job["status"] != "待核实":
+            nonempty(job, ["status_evidence"], jid)
+        if job["result"] == "纳入":
+            require(job.get("priority") in run["priority_order"], f"{jid}: 纳入岗位缺少规则定义的主优先级")
+            city_values = run["city_priority_order"] + ["待核实"] if run["city_priority_order"] else [""]
+            require(job.get("city_priority", "") in city_values, f"{jid}: 城市优先级无效")
+        else:
+            require(not job.get("priority") and not job.get("city_priority"), f"{jid}: 排除/不纳入/主分类待核实不能携带优先级")
+        if job["result"] == "排除":
+            nonempty(job, ["blacklist_reason"], jid)
+        if job["result"] == "待核实" or job.get("city_priority") == "待核实" or job["status"] == "待核实":
+            nonempty(job, ["uncertainties"], jid)
+    for cid, company in companies.items():
+        active = any(j["status"] == "在招" for j in grouped[cid])
+        if company["status"] in {"已停止", "当前无岗位", "暂未开放"}:
+            require(not active, f"{cid}: 单位状态与仍在招岗位冲突")
+        if company["status"] in {"在招", "部分在招"}:
+            require(active, f"{cid}: 在招单位没有任何已确认在招的岗位记录")
+    for info in data["other_info"]:
+        require(isinstance(info, dict), "other_info 元素应为对象")
+        nonempty(info, ["category", "item", "value"], "other_info")
+        require(type(info.get("needs_review", False)) is bool, "other_info.needs_review: 必须为布尔值")
+        require(not info.get("company_id") or info["company_id"] in companies, "other_info 引用了不存在的单位")
+        if info.get("job_key"):
+            require(any(j["job_key"] == info["job_key"] and
+                        (not info.get("company_id") or j["company_id"] == info["company_id"])
+                        for j in data["jobs"]), "other_info 引用了不存在的岗位")
+        check_url(info.get("source_url"), "other_info.source_url")
+        if info.get("checked_at"):
+            check_time(info["checked_at"], "other_info.checked_at")
+    return grouped
+
+
+def unique_count(jobs, predicate=lambda j: True):
+    return len({j["job_key"] for j in jobs if predicate(j)})
+
+
+def candidate(job):
+    return job["status"] == "在招" and job["result"] == "纳入" and job["eligibility"] != "不符"
+
+
+def flags(company, jobs):
+    if not jobs:
+        text = "无岗位记录"
+    elif all(j["result"] == "排除" for j in jobs):
+        text = "全部排除"
+    elif all(j["result"] == "不纳入" for j in jobs):
+        text = "全部不纳入"
+    elif all(j["result"] in {"排除", "不纳入"} for j in jobs):
+        text = "全部排除或不纳入"
+    elif not any(candidate(j) for j in jobs):
+        text = "无已确认在招的匹配候选"
+    else:
+        text = "有匹配候选"
+    if company["coverage"] != "完整":
+        return f"已见范围：{text}；核验未完成"
+    return text
+
+
+def official_max(quota):
+    if quota["status"] != "已确认":
+        return quota["status"]
+    if quota.get("shared_scope_id"):
+        cap = quota.get("max_positions")
+        return f"单位≤{cap}，另受共享/分层限制" if cap is not None else "见共享/分层限投规则"
+    return "明确不限岗位数量" if quota.get("unlimited") else quota["max_positions"]
+
+
+def theoretical_max(company, jobs):
+    count = unique_count(jobs, candidate)
+    quota = company["quota"]
+    if company["coverage"] != "完整":
+        return f"未核实（已发现匹配在招 {count} 个）"
+    if count == 0:
+        return 0
+    if quota.get("shared_scope_id"):
+        return f"需共享/分层统筹（匹配在招 {count} 个）"
+    if quota["status"] != "已确认":
+        return f"未核实（匹配在招 {count} 个）"
+    return count if quota.get("unlimited") else min(count, quota["max_positions"])
+
+
+def build_rows(data, grouped):
+    run = data["run"]
+    companies = {c["company_id"]: c for c in data["companies"]}
+    overview_headers = ["单位ID", "单位名称", "招聘状态", "核验完整性", "特殊标记", "投递总结", "已见独立岗位数", "岗位城市记录数",
+                        "确认在招岗位数", "筛选匹配在招岗位数", "其中资格已确认数", "排除岗位数", "不纳入岗位数", "筛选待核实岗位数",
+                        "官方最多可投岗位数", "限投适用范围", "共享额度标识", "共享/分层约束", "限投原文", "限投证据链接", "限投核验时间",
+                        "按筛选的理论可投上限(未扣已投)", "理论上限说明", "官方投递入口", "招聘状态依据", "招聘状态证据链接",
+                        "飞书来源链接", "来源记录ID", "核验时间", "备注"]
+    overview = []
+    for company in data["companies"]:
+        jobs = grouped[company["company_id"]]
+        quota = company["quota"]
+        count = unique_count(jobs, candidate)
+        verified = unique_count(jobs, lambda j: candidate(j) and j["eligibility"] == "符合已知条件")
+        summary = (f"{company['status']}；已见 {unique_count(jobs)} 个独立岗位；"
+                   f"匹配且在招 {count} 个（资格已确认 {verified} 个）；{flags(company, jobs)}")
+        if company.get("summary"):
+            summary += "；" + company["summary"]
+        notes = "未扣除个人历史已投；不是剩余志愿数或保证可投数。"
+        if count != verified:
+            notes += "包含资格未确认候选，需核实届次/学历/专业等。"
+        if quota.get("shared_scope_id"):
+            notes += "共享额度不可按单位相加。"
+        overview.append([company["company_id"], company["name"], company["status"], company["coverage"], flags(company, jobs), summary,
+                         unique_count(jobs), len(jobs), unique_count(jobs, lambda j: j["status"] == "在招"), count, verified,
+                         unique_count(jobs, lambda j: j["result"] == "排除"), unique_count(jobs, lambda j: j["result"] == "不纳入"),
+                         unique_count(jobs, lambda j: j["result"] == "待核实"), official_max(quota), quota.get("scope", "待核实"),
+                         quota.get("shared_scope_id", ""), quota.get("shared_scope_note", ""), quota.get("raw_text", ""),
+                         quota.get("source_url", ""), quota.get("checked_at", ""), theoretical_max(company, jobs), notes,
+                         company.get("application_url", ""), company.get("status_evidence", ""), company.get("status_source_url", ""),
+                         company.get("source_url", ""), "; ".join(company["source_record_ids"]), company["checked_at"], company.get("notes", "")])
+    job_fields = [("row_id", "城市记录ID"), ("company_id", "单位ID"), ("company_name", "单位名称"), ("job_key", "独立投递身份"),
+                  ("job_id", "官方岗位ID"), ("name", "岗位名称"), ("department", "部门/子单位"), ("batch", "招聘批次"), ("city", "工作城市"),
+                  ("status", "岗位状态"), ("result", "筛选结果"), ("priority", "主优先级"), ("city_priority", "城市子优先级"),
+                  ("rationale", "筛选原文依据"), ("blacklist_reason", "黑名单原因"), ("uncertainties", "待核实事项"),
+                  ("duties", "岗位职责"), ("requirements", "任职要求"), ("majors", "招聘专业"), ("education", "学历要求"),
+                  ("graduation", "届次要求"), ("eligibility", "个人资格核验"), ("headcount", "招聘人数(非限投数)"),
+                  ("deadline", "截止时间"), ("deadline_basis", "截止时间依据/时区"), ("deadline_source_url", "截止证据链接"),
+                  ("application_url", "投递链接"), ("source_url", "岗位来源链接"), ("status_evidence", "岗位状态原文"),
+                  ("status_source_url", "岗位状态证据链接"), ("checked_at", "核验时间"), ("notes", "备注")]
+    priorities = {p: i for i, p in enumerate(run["priority_order"])}
+    cities = {p: i for i, p in enumerate(run["city_priority_order"])}
+    fallback = len(priorities)
+    ordered = sorted(data["jobs"], key=lambda j: (
+        priorities.get(j.get("priority"), fallback + {"待核实": 0, "不纳入": 1, "排除": 2}.get(j["result"], 3)),
+        cities.get(j.get("city_priority"), len(cities)), companies[j["company_id"]]["name"], j["job_key"], j["city"]))
+    job_rows = [[companies[j["company_id"]]["name"] if key == "company_name" else j.get(key, "")
+                 for key, _ in job_fields] for j in ordered]
+    info_headers = ["类别", "单位ID", "岗位投递身份", "事项", "内容", "来源链接", "原文/证据", "核验时间", "需复核"]
+    info_rows = []
+
+    def info(category, item, value, cid="", key="", url="", quote="", checked_at=None, review=False):
+        info_rows.append([category, cid, key, item, str(value), url, quote, checked_at or run["checked_at"], "是" if review else "否"])
+
+    complete = (run["scope_verified"] and all(c["coverage"] == "完整" for c in data["companies"])
+                and (run.get("source_expected_records") is None or run["source_expected_records"] == len(run["source_record_ids"])))
+    info("运行元信息", "采集完整性", "完整采集（仍以待核实事项为准）" if complete else "部分完成：不得声称全量核验", review=not complete)
+    for key, title in [("scope", "本次指定范围"), ("scope_verified", "视图/单位范围是否已核实"), ("scope_evidence", "范围核实依据"),
+                       ("rules_file", "实际读取的规则文件"), ("rules_sha256", "规则文件 SHA-256"), ("priority_order", "主优先级顺序"),
+                       ("city_priority_order", "城市子优先级顺序"), ("source_expected_records", "源视图预期记录数(非单位数)"),
+                       ("notes", "运行说明")]:
+        if key in run:
+            value = json.dumps(run[key], ensure_ascii=False) if isinstance(run[key], list) else str(run[key])
+            info("运行元信息", title, value, url=run["source_url"] if key == "scope" else "")
+    info("统计口径", "本次单位/源记录/独立投递身份/城市记录数",
+         f"{len(companies)} / {len(run['source_record_ids'])} / {len({(j['company_id'], j['job_key']) for j in data['jobs']})} / {len(data['jobs'])}")
+    info("统计口径", "独立投递身份", "相同 company_id + job_key 的多城市行只计一个岗位；官方独立岗位ID/志愿ID才可分开计数。各筛选结果计数可能因城市条件不同而重叠，不应相加。")
+    info("统计口径", "最多可投 vs 招聘人数", "招聘人数不是限投岗位数；理论上限只对完整采集且已确认的独立单位限额计算，不扣历史已投，不保证个人资格；共享/分层额度不求和，不生成全局最大数。")
+    info("统计口径", "招聘状态与筛选结论相互独立", "历史停招岗位可仍有方向优先级，但不计入匹配在招数；访问失败不等于已停招，方向匹配不等于个人资格满足。")
+    for ignored in run.get("ignored_records", []):
+        info("源记录对账", ignored["record_id"], ignored["reason"])
+    for company in data["companies"]:
+        cid = company["company_id"]
+        quota = company["quota"]
+        if company["coverage"] != "完整" or company["status"] == "待核实":
+            info("异常与覆盖率", "单位核验未完成/状态待核实", company.get("notes") or "详见状态证据", cid, url=company.get("status_source_url", ""), review=True)
+        if quota["status"] != "已确认" or quota.get("shared_scope_id") or quota.get("notes"):
+            info("限投规则", quota.get("scope") or "适用范围待核实",
+                 f"{quota['status']}；{quota.get('shared_scope_note', '')}；{quota.get('notes', '')}", cid,
+                 url=quota.get("source_url", ""), quote=quota.get("raw_text", ""), checked_at=quota.get("checked_at"),
+                 review=quota["status"] != "已确认" or bool(quota.get("shared_scope_id")))
+    for job in ordered:
+        if job.get("uncertainties") or job["eligibility"] in {"待核实", "未评估"}:
+            info("岗位待复核", job["name"], (job.get("uncertainties") or "无其他筛选疑点") + f"；个人资格：{job['eligibility']}",
+                 job["company_id"], job["job_key"], job["source_url"], checked_at=job["checked_at"], review=True)
+    for item in data["other_info"]:
+        info(item["category"], item["item"], item["value"], item.get("company_id", ""), item.get("job_key", ""),
+             item.get("source_url", ""), item.get("quote", ""), item.get("checked_at"), item.get("needs_review", False))
+    return [(overview_headers, overview), ([title for _, title in job_fields], job_rows), (info_headers, info_rows)]
+
+
+def literal_cell(ws, row, column, value):
+    require(isinstance(value, (str, int, float, bool)) or value is None, f"{ws.title} R{row}C{column}: 单元格不能为列表/对象")
+    if isinstance(value, str):
+        require(not BAD_XML.search(value), f"{ws.title} R{row}C{column}: 存在 XML 非法控制字符，请清理并保留原始证据文件")
+        require(len(value) <= 32767, f"{ws.title} R{row}C{column}: 超过 Excel 单元格长度限制，请改为摘要+本地证据路径")
+    cell = ws.cell(row, column, value)
+    if isinstance(value, str):
+        # Explicit string cells prevent formula injection, including =, +, -, @ prefixes.
+        cell.data_type = "s"
+        if value.startswith(("https://", "http://")) and not any(c.isspace() for c in value):
+            check_url(value, f"{ws.title} R{row}C{column}")
+            cell.hyperlink = value
+            cell.font = Font(color="0563C1", underline="single", size=10)
+    cell.alignment = Alignment(vertical="top", wrap_text=True)
+    return cell
+
+
+def export_audit(data, output, overwrite=False):
+    grouped = validate(data)
+    tables = build_rows(data, grouped)
+    output = Path(output).resolve()
+    require(output.suffix.lower() == ".xlsx", "输出文件必须使用 .xlsx 扩展名")
+    require(overwrite or not output.exists(), f"输出已存在，未覆盖: {output}（显式 --overwrite 才可覆盖）")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for index, (name, (headers, rows)) in enumerate(zip(SHEETS, tables)):
+        ws = workbook.create_sheet(name)
+        for row_num, values in enumerate([headers] + rows, 1):
+            for col_num, value in enumerate(values, 1):
+                cell = literal_cell(ws, row_num, col_num, value)
+                if row_num == 1:
+                    cell.fill = PatternFill("solid", fgColor="203864")
+                    cell.font = Font(color="FFFFFF", bold=True, size=10)
+            if row_num > 1:
+                color = None
+                if index == 0:
+                    color = "FCE4D6" if "全部" in str(values[4]) else ("FFF2CC" if values[3] != "完整" else None)
+                elif index == 1:
+                    color = COLORS.get(values[10])
+                    if values[9] != "在招" or values[21] == "不符":
+                        color = "E7E6E6" if values[9] != "待核实" else "FFF2CC"
+                elif values[-1] == "是":
+                    color = "FFF2CC"
+                if color:
+                    for cell in ws[row_num]:
+                        cell.fill = PatternFill("solid", fgColor=color)
+        ws.freeze_panes = ["C2", "F2", "D2"][index]
+        ws.auto_filter.ref = ws.dimensions
+        ws.sheet_view.zoomScale = 85
+        ws.row_dimensions[1].height = 42
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.print_title_rows = "1:1"
+        for col, title in enumerate(headers, 1):
+            width = 36 if any(k in title for k in ["链接", "入口", "原文", "依据", "总结", "约束", "事项", "职责", "要求", "说明", "备注", "内容"]) else 20
+            ws.column_dimensions[get_column_letter(col)].width = width
+    handle, temp_name = tempfile.mkstemp(prefix=".audit-", suffix=".xlsx", dir=output.parent)
+    os.close(handle)
+    try:
+        workbook.save(temp_name)
+        workbook.close()
+        check = load_workbook(temp_name)
+        try:
+            require(check.sheetnames == SHEETS, "Excel 回读失败：Sheet 不符")
+            for name, (headers, rows) in zip(SHEETS, tables):
+                ws = check[name]
+                require(ws.max_row == len(rows) + 1 and ws.max_column == len(headers), f"Excel 回读失败：{name} 维度不符")
+                require(not any(cell.data_type == "f" for row in ws for cell in row), "Excel 出现意外公式")
+        finally:
+            check.close()
+        if overwrite:
+            os.replace(temp_name, output)
+        else:
+            # Exclusive reservation also prevents accidental overwrite if another run wins a race.
+            with output.open("xb"):
+                pass
+            try:
+                os.replace(temp_name, output)
+            except OSError:
+                output.unlink(missing_ok=True)
+                raise
+    finally:
+        workbook.close()
+        Path(temp_name).unlink(missing_ok=True)
+    return {"output": str(output), "companies": len(data["companies"]), "job_city_rows": len(data["jobs"]),
+            "unique_positions": len({(j["company_id"], j["job_key"]) for j in data["jobs"]}), "sheets": SHEETS}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input", type=Path, help="按 references/data-contract.md 生成的审计 JSON")
+    parser.add_argument("-o", "--output", type=Path, required=True)
+    parser.add_argument("--overwrite", action="store_true")
+    args = parser.parse_args()
+    try:
+        data = json.loads(args.input.read_text(encoding="utf-8-sig"))
+        validate(data)
+        # Check a locally accessible rule file against the recorded snapshot hash.
+        rules = Path(data.get("run", {}).get("rules_file", ""))
+        if rules.is_file():
+            digest = hashlib.sha256(rules.read_bytes()).hexdigest()
+            require(digest.lower() == data["run"].get("rules_sha256", "").lower(), "规则文件已变更：必须重新核对筛选或使用本次规则快照路径")
+        print(json.dumps(export_audit(data, args.output, args.overwrite), ensure_ascii=False, indent=2))
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        parser.exit(2, f"导出失败: {exc}\n")
+
+
+if __name__ == "__main__":
+    main()
