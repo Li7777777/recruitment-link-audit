@@ -19,6 +19,7 @@ compatibility: 外部招聘网站需可用的网页访问工具，优先 ego-bro
 - `references/verification.md`：范围、招聘状态、限投证据、去重、异常处理的详细口径。**开始核验前读取。**
 - `references/feishu-cli.md`：官方 `lark-cli` 安装/最小权限授权、按用户身份读取视图、NDJSON 分页与隐私边界。**选择 CLI 渠道或处理 CLI 授权时先读取。**
 - `references/data-contract.md`：审计 JSON 格式、统计口径与字段。**创建结构化结果/导出前读取。**
+- [岗位优先级.md](岗位优先级.md)：用户明确授权公开的一份可选规则版本；**仅在用户指定使用此文件时读取，不替代其他用户指定规则，也不隐式改变默认筛选行为。**
 - `scripts/export_excel.py`：校验 JSON、生成并回读核验三张 Sheet；不负责联网或岗位语义判断。
 - `scripts/test_export_excel.py`：离线回归测试。
 - `assets/example-audit.json`：**虚构示例**，只演示格式，不是实际招聘结果，不得冒充核验数据。

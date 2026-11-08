@@ -34,7 +34,7 @@
 git clone https://github.com/Li7777777/recruitment-link-audit.git ~/.agents/skills/recruitment-link-audit
 ```
 
-Windows 对应位置是用户主目录下的 `.agents/skills/recruitment-link-audit`。也可只复制 `SKILL.md`、`references/`、`scripts/`、`assets/` 和 `requirements.txt`。已有同名 Skill 时先比较内容、备份，再更新，避免覆盖自己的改动。
+Windows 对应位置是用户主目录下的 `.agents/skills/recruitment-link-audit`。也可只复制 `SKILL.md`、`references/`、`scripts/`、`assets/` 和 `requirements.txt`；如需随附的公开规则，一并复制 `岗位优先级.md`。已有同名 Skill 时先比较内容、备份，再更新，避免覆盖自己的改动。
 
 Pi 用户安装后执行 `/reload`；其他助手按各自的 Skill 加载方式刷新。
 
@@ -70,7 +70,13 @@ lark-cli auth status --json --verify
 
 安装、授权分轮确认、视图读取命令、`--filter-json` 覆盖视图的陷阱、NDJSON/manifest 完整性及回退方式，见 **[飞书 CLI 读取指南](references/feishu-cli.md)**。本次接入不包含自动安装、真实授权或私有表访问测试。
 
-个人规则、CLI 配置/授权链接/二维码/令牌、实际招聘数据不属于项目源码，请存到独立的本地工作目录，不要提交到公开仓库。
+### 可选的公开岗位规则
+
+经用户明确授权，仓库随附 [岗位优先级.md](岗位优先级.md)，保存本次同意公开的规则版本：仅校招正式岗位、T0～T3 主优先级、城市子优先级及排除规则。该文件不含个人身份、联系方式或访问凭证。
+
+这是**可显式选用的规则文件，不是 Skill 强制默认值**。每次仍以用户指定文件为准；要使用这一版，请明确写“按仓库中的 @岗位优先级.md 筛选”。修改自己的私有规则时请另存到仓库外，不要直接改动并公开提交。
+
+其他未经公开授权的个人规则、CLI 配置/授权链接/二维码/令牌、实际招聘数据，请存到独立的本地工作目录，不要提交到公开仓库。
 
 ## 离线导出与测试
 
@@ -101,6 +107,7 @@ python scripts/export_excel.py <本地工作目录>/audit.json -o <本地工作�
 
 ```text
 SKILL.md                        # Skill 入口和完整执行流程
+岗位优先级.md                    # 用户授权公开、可显式选用的规则版本
 references/verification.md      # 状态/范围/限额核验口径
 references/feishu-cli.md        # 官方 CLI 安装、授权与视图只读获取
 references/data-contract.md     # 审计 JSON 字段与导出约定
@@ -114,7 +121,7 @@ SECURITY.md                     # 隐私与提交检查说明
 
 ## 隐私与安全
 
-仓库只包含通用流程、代码和虚构示例，不包含真实招聘表、个人简历、个人规则文件、飞书应用凭证、API Key 或导出报告。`.gitignore` 对运行数据和敏感文件作默认防护，但不能替代提交前检查。
+仓库包含通用流程、代码、虚构示例，以及用户明确授权公开的根目录 `岗位优先级.md`；不包含真实招聘表、个人简历、未授权公开的私有规则、飞书应用凭证、API Key 或导出报告。`.gitignore` 仅为该根目录规则开了例外，运行数据和其他敏感文件仍应排除，提交前仍需检查。
 
 可使用 [Gitleaks](https://github.com/gitleaks/gitleaks) 在本地扫描：
 

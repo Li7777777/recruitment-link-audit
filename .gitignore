@@ -48,8 +48,9 @@ cookies*
 *.db
 *.sqlite*
 
-# Personal rules, evidence, recruitment snapshots, and exports
+# Private rules and runtime data; only the root rule is approved for publication.
 岗位优先级.md
+!/岗位优先级.md
 规则快照.md
 private/
 local/
