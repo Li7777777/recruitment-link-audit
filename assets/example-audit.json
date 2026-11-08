@@ -11,7 +11,8 @@
     "rules_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "checked_at": "2026-10-28T15:30:00+08:00",
     "priority_order": ["T0", "T1", "T2", "T3"],
-    "city_priority_order": ["T0", "T1", "T3"],
+    "city_priority_order": ["T0", "T1", "T2"],
+    "city_exclusion_priorities": ["T2"],
     "notes": "本文件所有单位、岗位、证据、日期、规则路径和哈希均为虚构测试数据。实际任务不得沿用。"
   },
   "companies": [
@@ -136,11 +137,11 @@
       "status_source_url": "https://example.invalid/b/jobs/IMAGE-001",
       "result": "排除",
       "priority": "",
-      "city_priority": "T3",
+      "city_priority": "T2",
       "classification_basis": "岗位职责",
       "classification_confidence": "高",
       "rationale": "虚构职责：以图像分割为核心，命中本示例的排除规则；实际分类必须读用户指定规则。",
-      "blacklist_reason": "虚构示例黑名单：核心职责为图像算法研发。",
+      "blacklist_reason": "虚构示例黑名单：核心职责为图像算法研发；工作地点北京也命中城市T2地域排除。",
       "uncertainties": "",
       "duties": "虚构：图像分割算法研发。",
       "eligibility": "未评估",

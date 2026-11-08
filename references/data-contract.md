@@ -40,7 +40,8 @@ JSON 顶层必须有 `run`（对象）、`companies`（数组）、`jobs`（数�
 | rules_sha256 | 必填，64 位十六进制 SHA-256 |
 | checked_at | 必填，本次范围核验时间，含时区 |
 | priority_order | 必填字符串数组，从高到低，按本次规则，如 ["T0","T1","T2","T3"]；不是脚本内置等级 |
-| city_priority_order | 必填字符串数组，独立城市等级从高到低；随附规则为 ["T0","T1","T3"]，不设置城市T2；其他规则按其定义，未设城市等级时为 [] |
+| city_priority_order | 必填字符串数组，独立城市等级从高到低；随附规则为 ["T0","T1","T2"]，不设置城市T3；其他规则按其定义，未设城市等级时为 [] |
+| city_exclusion_priorities | 可选字符串数组，默认[]，必须属于city_priority_order；随附规则为["T2"]，只有用户明确设定的等级才作为硬性地域排除 |
 | notes | 可选，本轮限制/快照路径等 |
 
 `source_record_ids` 必须恰好等于所有 company.source_record_ids 与 ignored_records.record_id 的并集。可一源行展开多个单位，但不能把同一行同时映射和忽略，不能混入范围外行。只存在于用户单位名单而源表未找到的单位可用空来源 ID。
@@ -135,7 +136,8 @@ status 为在招/部分在招，至少有一条该单位的 job.status=在招；
 - result=排除：`blacklist_reason`必填，说明黑名单或招聘类型等范围排除原因。方向等级通常留空；若显式direction_result=纳入（例如Agent实习因招聘类型排除），可保留已知方向等级，但不计候选。
 - **所有筛选结果都可独立填写city_priority**，不因方向待核实/排除/不纳入而清空；值应来自run.city_priority_order或“待核实”。规则无城市等级时为""。旧JSON的空城市等级兼容读取并生成非阻断补充提示，新任务应逐行独立评级。
 - result=待核实或status=待核实：`uncertainties`或`blocking_issues`至少有一项具体说明。
-- city_priority=待核实时，uncertainties/nonblocking_notes/blocking_issues至少一项说明地点缺失；仅地点未知不改变已确认方向，也不自动进入阻断复核。
+- city_priority=待核实时，uncertainties/nonblocking_notes/blocking_issues至少一项说明地点缺失。无地域排除策略时，地点缺失通常不阻断；启用city_exclusion_priorities后，未知/空城市等级不能最终纳入，可保留direction_result=纳入及priority、将result设待核实并说明blocking_issues。
+- city_priority命中run.city_exclusion_priorities时，result必须为排除，并填写blacklist_reason说明地域原因；即使方向T0也不计候选。同岗多城市仅排除命中的城市行，保留其他有效城市，job_key仍共用。
 
 其他可选字段（建议尽可能依据原文填充，不得猜）：
 
@@ -183,11 +185,11 @@ status 为在招/部分在招，至少有一条该单位的 job.status=在招；
 
 category/item/value 必填非空字符串，其余可选；关联 ID 若填写必须真实存在。checked_at 未提供则按 run.checked_at，只有确实同次核验的事项才可省略。
 
-脚本自动加入：范围和规则元信息、完整性警告、源行忽略原因、统计口径、缺失/复杂限投，以及按真实投递身份和具体问题去重的岗位阻断复核。个人资格未评估只对匹配在招候选按单位汇总为非阻断提示；城市缺失、名称直判或其他补充说明不自动标“需复核”。原uncertainties仍在岗位表完整展示，但非空本身不触发复核。附加证据/流程等由Agent补充，显式other_info.needs_review也应遵循阻断口径，不能机械标全部为true。
+脚本自动加入：范围和规则元信息、完整性警告、源行忽略原因、统计口径、缺失/复杂限投，以及按真实投递身份和具体问题去重的岗位阻断复核。个人资格未评估只对匹配在招候选按单位汇总为非阻断提示；名称直判或其他补充说明不自动标“需复核”；城市缺失仅在没有硬性地域排除时作为非阻断提示，存在地域黑名单则会影响最终可投性。原uncertainties仍在岗位表完整展示，但非空本身不触发复核。附加证据/流程等由Agent补充，显式other_info.needs_review也应遵循阻断口径，不能机械标全部为true。
 
 ## 6. 数量和汇总行为
 
-- 总岗位数按 `(company_id, job_key)` 去重；多城市行另列数量。岗位与城市评级独立，城市T3不自动排除、不减少候选，也不等于岗位T3。
+- 总岗位数按 `(company_id, job_key)` 去重；多城市行另列数量。岗位与城市评级独立；随附规则城市T2是地域黑名单，命中城市行最终排除且不计候选，已知方向可保留。岗位T2仍是计算机技术方向，不等于地域排除。
 - 默认排序先按最终筛选结果（纳入→待核实→不纳入→排除），再按岗位和城市两套顺序辅助展示；评级本身不依赖该排序，不合成单一总等级。
 - “筛选匹配在招岗位数”要求 result=纳入、status=在招、eligibility≠不符。
 - “其中资格已确认数”进一步要求 eligibility=符合已知条件，仍不保证账户名额或投递成功。

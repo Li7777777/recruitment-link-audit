@@ -119,6 +119,7 @@ class ExportTests(unittest.TestCase):
 
     def test_mixed_excluded_and_not_included_marked(self):
         data = fixture()
+        data["run"]["city_exclusion_priorities"] = []  # Test generic flags independently of geography.
         job = copy.deepcopy(data["jobs"][2])
         job.update(row_id="extra", job_key="different-identity", result="不纳入", blacklist_reason="")
         data["jobs"].append(job)
@@ -169,6 +170,7 @@ class ExportTests(unittest.TestCase):
     def test_no_city_ranking_and_custom_priority(self):
         data = fixture()
         data["run"]["city_priority_order"] = []
+        data["run"]["city_exclusion_priorities"] = []
         data["run"]["priority_order"] = ["优先"]
         for job in data["jobs"]:
             job["city_priority"] = ""
@@ -284,7 +286,7 @@ class ExportTests(unittest.TestCase):
         data = fixture()
         pending = copy.deepcopy(data["jobs"][0])
         pending.update(row_id="unknown-direction", job_key="unknown-direction", result="待核实", priority="",
-                       city="西宁", city_priority="T3", uncertainties="名称宽泛，方向无法确定")
+                       city="成都", city_priority="T1", uncertainties="名称宽泛，方向无法确定")
         data["jobs"].append(pending)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "independent.xlsx"
@@ -293,18 +295,56 @@ class ExportTests(unittest.TestCase):
             try:
                 by_id = {r["城市记录ID"]: r for r in records(wb[SHEETS[1]])}
                 self.assertEqual(by_id["example-b-image"]["筛选结果"], "排除")
-                self.assertEqual(by_id["example-b-image"]["城市优先级"], "T3")
-                self.assertEqual(by_id["unknown-direction"]["城市优先级"], "T3")
+                self.assertEqual(by_id["example-b-image"]["城市优先级"], "T2")
+                self.assertEqual(by_id["unknown-direction"]["城市优先级"], "T1")
                 self.assertIsNone(by_id["unknown-direction"]["岗位优先级"])
             finally:
                 wb.close()
 
-    def test_job_t0_city_t3_remains_a_candidate(self):
+    def test_city_exclusion_blocks_t0_but_preserves_other_optional_cities(self):
         data = fixture()
-        data["jobs"][0].update(city="北京", city_priority="T3")
-        data["jobs"][1].update(city="杭州", city_priority="T0")
+        data["jobs"][0].update(city="北京", city_priority="T2")
+        with self.assertRaisesRegex(ValueError, "命中城市排除规则"):
+            validate(data)
+        data["jobs"][0].update(result="排除", direction_result="纳入", blacklist_reason="工作地点北京命中地域黑名单")
         self.assertEqual(theoretical_max(data["companies"][0], validate(data)["example-a"]), 1)
+        self.assertEqual(data["jobs"][0]["priority"], "T0")  # Direction is retained, but this city is not a candidate.
+        data["jobs"][1].update(city="西宁", city_priority="T2", result="排除", direction_result="纳入",
+                               blacklist_reason="工作地点西宁命中地域黑名单")
+        self.assertEqual(theoretical_max(data["companies"][0], validate(data)["example-a"]), 0)
+
+    def test_city_exclusion_is_opt_in_for_other_user_policies(self):
+        data = fixture()
+        data["run"]["city_exclusion_priorities"] = []
+        data["jobs"][0].update(city="北京", city_priority="T2")
+        self.assertEqual(theoretical_max(data["companies"][0], validate(data)["example-a"]), 1)
+
+    def test_city_exclusion_priority_must_be_a_declared_rank(self):
+        data = fixture()
+        data["run"]["city_exclusion_priorities"] = ["T9"]
+        with self.assertRaisesRegex(ValueError, "城市排除等级"):
+            validate(data)
+
+    def test_unknown_location_blocks_acceptance_only_under_exclusion_policy(self):
+        data = fixture()
+        data["jobs"][0].update(city="待核实", city_priority="待核实", uncertainties="实际工作地点未知")
+        with self.assertRaisesRegex(ValueError, "地点未核实不能最终纳入"):
+            validate(data)
+        data["jobs"][0].update(result="待核实", direction_result="纳入", blocking_issues="地点未知，无法排除禁投地区")
+        from export_excel import build_rows
+        tables = build_rows(data, validate(data))
+        blockers = [row for row in tables[2][1] if row[0] == "岗位阻断复核"]
+        self.assertEqual(len(blockers), 1)
+        self.assertEqual(blockers[0][-1], "是")
         self.assertEqual(data["jobs"][0]["priority"], "T0")
+
+    def test_known_excluded_city_does_not_wait_for_unknown_direction(self):
+        data = fixture()
+        data["jobs"][2].update(direction_result="待核实", duties="", majors="",
+                               blacklist_reason="工作地点北京命中地域黑名单；不必等待方向详情")
+        from export_excel import build_rows
+        tables = build_rows(data, validate(data))
+        self.assertFalse(any(row[0] == "岗位阻断复核" for row in tables[2][1]))
 
     def test_personal_unknowns_are_not_blanket_blocking_reviews(self):
         data = fixture()
@@ -358,8 +398,9 @@ class ExportTests(unittest.TestCase):
         rows = build_rows(data, validate(data))[1][1]
         self.assertEqual([r[10] for r in rows[:3]], ["纳入", "纳入", "待核实"])
 
-    def test_city_only_unknown_is_nonblocking(self):
+    def test_city_only_unknown_is_nonblocking_without_geographic_exclusion(self):
         data = fixture()
+        data["run"]["city_exclusion_priorities"] = []
         data["jobs"][0].update(city="待核实", city_priority="待核实", uncertainties="实际工作地点未提供")
         from export_excel import build_rows
         tables = build_rows(data, validate(data))

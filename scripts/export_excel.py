@@ -82,6 +82,10 @@ def validate(data):
     require(re.fullmatch(r"[0-9a-fA-F]{64}", run["rules_sha256"]) is not None, "run.rules_sha256: 应为 SHA-256")
     for field in ["priority_order", "city_priority_order", "source_record_ids"]:
         string_ids(run.get(field), f"run.{field}")
+    city_exclusions = run.get("city_exclusion_priorities", [])
+    string_ids(city_exclusions, "run.city_exclusion_priorities")
+    require(all(rank in run["city_priority_order"] for rank in city_exclusions),
+            "城市排除等级必须属于city_priority_order")
     expected = run.get("source_expected_records")
     require(expected is None or (type(expected) is int and expected >= 0), "run.source_expected_records: 应为非负整数或 null")
     ignored = run.get("ignored_records", [])
@@ -171,6 +175,10 @@ def validate(data):
         # Empty city rank is accepted for legacy data, never required by exclusion.
         city_values = run["city_priority_order"] + ["待核实", ""] if run["city_priority_order"] else [""]
         require(job.get("city_priority", "") in city_values, f"{jid}: 城市优先级无效")
+        if job.get("city_priority") in city_exclusions:
+            require(job["result"] == "排除", f"{jid}: 命中城市排除规则，最终结果必须排除")
+        if city_exclusions and job.get("city_priority", "") in {"", "待核实"}:
+            require(job["result"] != "纳入", f"{jid}: 已启用地域排除，地点未核实不能最终纳入；可保留方向等级")
         for field in ["blocking_issues", "nonblocking_notes"]:
             require(isinstance(job.get(field, ""), str), f"{jid}.{field}: 应为字符串")
         if job.get("classification_basis"):
@@ -318,7 +326,8 @@ def build_rows(data, grouped):
     info("运行元信息", "采集完整性", "完整采集（仍以待核实事项为准）" if complete else "部分完成：不得声称全量核验", review=not complete)
     for key, title in [("scope", "本次指定范围"), ("scope_verified", "视图/单位范围是否已核实"), ("scope_evidence", "范围核实依据"),
                        ("rules_file", "实际读取的规则文件"), ("rules_sha256", "规则文件 SHA-256"), ("priority_order", "岗位优先级顺序"),
-                       ("city_priority_order", "独立城市优先级顺序"), ("source_expected_records", "源视图预期记录数(非单位数)"),
+                       ("city_priority_order", "独立城市优先级顺序"), ("city_exclusion_priorities", "硬性排除的城市等级"),
+                       ("source_expected_records", "源视图预期记录数(非单位数)"),
                        ("notes", "运行说明")]:
         if key in run:
             value = json.dumps(run[key], ensure_ascii=False) if isinstance(run[key], list) else str(run[key])
@@ -340,7 +349,7 @@ def build_rows(data, grouped):
                  f"{quota['status']}；{quota.get('shared_scope_note', '')}；{quota.get('notes', '')}", cid,
                  url=quota.get("source_url", ""), quote=quota.get("raw_text", ""), checked_at=quota.get("checked_at"),
                  review=quota["status"] != "已确认" or bool(quota.get("shared_scope_id")))
-    info("复核口径", "阻断事项与补充信息分开", "仅真实筛选阻断、明确冲突或候选开放状态不明等标需复核；个人资料未提供、仅缺城市或名称直判尚无完整JD，不自动把岗位标待复核。方向与城市独立，城市低等级不代表排除。")
+    info("复核口径", "阻断事项与补充信息分开", "仅真实筛选阻断、明确冲突或候选开放状态不明等标需复核；个人资料未提供或名称直判尚无完整JD，不自动把岗位标待复核。城市独立评级；仅用户明确设为排除的城市等级才硬性排除，启用地域排除时地点未知会阻断最终纳入。")
     for company in data["companies"]:
         cid = company["company_id"]
         count = unique_count(grouped[cid], lambda j: candidate(j) and j["eligibility"] in {"待核实", "未评估"})
@@ -358,6 +367,9 @@ def build_rows(data, grouped):
             blocking.append(job["blocking_issues"])
         if job["result"] in {"纳入", "待核实"} and job["status"] == "待核实":
             blocking.append("岗位是否仍开放待核实")
+        if (run.get("city_exclusion_priorities") and job["result"] == "待核实"
+                and job.get("city_priority", "") in {"", "待核实"}):
+            blocking.append("实际工作地点未确认，无法排除地域黑名单")
         issue = "；".join(dict.fromkeys(blocking))
         signature = (job["company_id"], job["job_key"], issue)
         if issue and signature not in seen_issues:
@@ -366,7 +378,7 @@ def build_rows(data, grouped):
                  job["source_url"], checked_at=job["checked_at"], review=True)
         # Original uncertainties stay visible in the job table, not an all-purpose review flag.
         note = job.get("nonblocking_notes", "")
-        if job.get("city_priority") == "待核实":
+        if job.get("city_priority") == "待核实" and not run.get("city_exclusion_priorities"):
             note = "实际工作地点待补充；已有岗位方向保留。" + note
         signature = (job["company_id"], job["job_key"], note)
         if note and signature not in seen_issues:
