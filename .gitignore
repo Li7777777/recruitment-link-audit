@@ -16,7 +16,11 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Credentials, private keys, session state
+# Credentials, private keys, session state (including CLI OAuth)
+.lark-cli/
+.larksuite/
+.lark/
+auth-qr*.png
 *credentials*
 *secret*
 *.pem

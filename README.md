@@ -6,6 +6,7 @@
 
 ## 功能
 
+- 通过官方飞书 CLI（`lark-cli`）、浏览器或已有授权的只读 API 获取源表。
 - 限定飞书视图、指定单位或二者交集，保留源记录追踪。
 - 区分在招、已停止、暂未开放、当前无岗位与无法核实。
 - 读取用户指定的规则，不内置个人岗位偏好或私有画像。
@@ -53,9 +54,23 @@ Pi 用户安装后执行 `/reload`；其他助手按各自的 Skill 加载方式
 /skill:recruitment-link-audit 检查 <飞书链接> 中的 <单位列表>，规则用 @<规则文件路径>，导出 Excel。
 ```
 
-执行网页任务需要助手可用的浏览器或已有授权的只读 API。本 Skill 优先使用 `ego-browser`，需先加载该 Skill 并遵循本机安装版本的使用指南。**本仓库不提供浏览器登录态、飞书凭证或任何账号密码。**
+飞书源表可优先复用已安装且已授权的官方 `lark-cli`；用户指定其他渠道时遵从用户选择。外部招聘网站仍需要浏览器，优先使用 `ego-browser`，先加载其 Skill 并遵循本机指南。**本仓库不提供浏览器登录态、CLI 授权、飞书凭证或任何账号密码。**
 
-个人规则和实际招聘数据不属于项目源码，请存到独立的本地工作目录，不要提交到公开仓库。
+### 使用官方飞书 CLI 获取源表
+
+官方项目：[larksuite/cli](https://github.com/larksuite/cli)，npm 包 `@larksuite/cli`，命令 `lark-cli`。不要与其他同名社区工具混用。未安装时可在同意安装后按官方流程执行：
+
+```bash
+npx @larksuite/cli@latest install
+lark-cli --version
+lark-cli auth status --json --verify
+```
+
+已有登录可直接复用；首次应用配置与 OAuth 需用户确认，按当前版本选择最小只读 scope，不默认申请全域/写权限。读取始终明确用户身份，检查真实视图范围并完整分页。CLI 不自动继承浏览器登录态，也不赋予原本没有的文档访问权限。
+
+安装、授权分轮确认、视图读取命令、`--filter-json` 覆盖视图的陷阱、NDJSON/manifest 完整性及回退方式，见 **[飞书 CLI 读取指南](references/feishu-cli.md)**。本次接入不包含自动安装、真实授权或私有表访问测试。
+
+个人规则、CLI 配置/授权链接/二维码/令牌、实际招聘数据不属于项目源码，请存到独立的本地工作目录，不要提交到公开仓库。
 
 ## 离线导出与测试
 
@@ -87,9 +102,11 @@ python scripts/export_excel.py <本地工作目录>/audit.json -o <本地工作�
 ```text
 SKILL.md                        # Skill 入口和完整执行流程
 references/verification.md      # 状态/范围/限额核验口径
+references/feishu-cli.md        # 官方 CLI 安装、授权与视图只读获取
 references/data-contract.md     # 审计 JSON 字段与导出约定
 scripts/export_excel.py         # 离线导出器
-scripts/test_export_excel.py    # 离线回归测试
+scripts/test_export_excel.py    # 离线导出回归测试
+scripts/test_cli_docs.py        # CLI 指南与只读示例约束检查
 assets/example-audit.json       # 明确标注的虚构示例
 requirements.txt               # openpyxl
 SECURITY.md                     # 隐私与提交检查说明
