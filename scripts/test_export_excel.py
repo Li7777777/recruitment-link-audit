@@ -24,7 +24,7 @@ def records(ws):
 
 
 class ExportTests(unittest.TestCase):
-    def test_three_sheets_and_city_deduplication(self):
+    def test_four_sheets_and_city_deduplication(self):
         data = fixture()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "测试导出.xlsx"
@@ -214,7 +214,7 @@ class ExportTests(unittest.TestCase):
                     export_audit(data, path)
                 self.assertFalse(path.exists())
 
-    def test_empty_audit_keeps_all_three_headers(self):
+    def test_empty_audit_keeps_all_four_headers(self):
         data = fixture()
         data["source_companies"] = []
         data["companies"] = []
@@ -411,6 +411,83 @@ class ExportTests(unittest.TestCase):
         notes = [r for r in tables[2][1] if r[0] == "非阻断补充"]
         self.assertTrue(notes)
         self.assertTrue(all(r[-1] == "否" for r in notes))
+
+    def test_filtered_sheet_is_exact_final_result_subset_without_extra_gates(self):
+        data = fixture()
+        data["jobs"][0].update(status="已停止", status_evidence="虚构：此城市申请窗口已结束，方向仍匹配",
+                               notes="说明中出现排除和不纳入，但最终筛选结果为纳入")
+        data["jobs"][1].update(eligibility="不符", uncertainties="", notes="个人资格不符不改变此处最终方向筛选结果")
+        data["jobs"][2].update(name="Agent开发（北京，虚构）", direction_result="纳入", priority="T0",
+                               rationale="方向T0，但工作地点北京命中地域排除", blacklist_reason="北京命中地域黑名单")
+        pending = copy.deepcopy(data["jobs"][0])
+        pending.update(row_id="pending-filter", job_key="pending-filter", name="研发方向待明确（虚构）",
+                       result="待核实", priority="", status="在招", status_evidence="虚构：本轮仍接受申请",
+                       eligibility="未评估", uncertainties="名称宽泛，需确认岗位方向")
+        not_included = copy.deepcopy(data["jobs"][0])
+        not_included.update(row_id="not-included-filter", job_key="not-included-filter", name="行政支持（虚构）",
+                            result="不纳入", priority="", rationale="非计算机技术且未见计算机专业依据")
+        data["jobs"].extend([pending, not_included])
+        snapshot = copy.deepcopy(data)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "filtered.xlsx"
+            result = export_audit(data, path)
+            self.assertEqual(data, snapshot)
+            self.assertEqual(result["job_city_rows"], 5)
+            self.assertEqual(result["filtered_job_city_rows"], 3)
+            wb = load_workbook(path)
+            try:
+                full = list(wb["所有单位岗位总表"].values)
+                filtered = list(wb["筛选后岗位表"].values)
+                self.assertEqual(filtered[0], full[0])
+                result_column = full[0].index("筛选结果")
+                expected = [row for row in full[1:] if row[result_column] in {"纳入", "待核实"}]
+                self.assertEqual(filtered[1:], expected)
+                self.assertEqual({row[result_column] for row in filtered[1:]}, {"纳入", "待核实"})
+                rows = records(wb["筛选后岗位表"])
+                self.assertTrue(any(row["岗位状态"] == "已停止" for row in rows))
+                self.assertTrue(any(row["个人资格核验"] == "不符" for row in rows))
+                self.assertFalse(any(row["城市记录ID"] == "example-b-image" for row in rows))
+            finally:
+                wb.close()
+
+    def test_filtered_sheet_keeps_headers_when_all_rows_are_removed(self):
+        data = fixture()
+        for job in data["jobs"][:2]:
+            job.update(result="不纳入", priority="", rationale="虚构：当前证据未命中所选规则")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "empty-filtered.xlsx"
+            result = export_audit(data, path)
+            self.assertEqual(result["filtered_job_city_rows"], 0)
+            wb = load_workbook(path)
+            try:
+                ws = wb["筛选后岗位表"]
+                self.assertEqual(ws.max_row, 1)
+                self.assertEqual(list(ws.values)[0], list(wb["所有单位岗位总表"].values)[0])
+                self.assertEqual(wb["所有单位岗位总表"].max_row, 4)
+                self.assertEqual(ws.freeze_panes, "F2")
+                self.assertTrue(ws.auto_filter.ref)
+            finally:
+                wb.close()
+
+    def test_four_sheet_order_and_filtered_job_layout(self):
+        self.assertEqual(SHEETS, ["所有单位总览", "所有单位岗位总表", "其他信息表", "筛选后岗位表"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "four-sheets.xlsx"
+            export_audit(fixture(), path)
+            wb = load_workbook(path)
+            try:
+                self.assertEqual(wb.sheetnames, SHEETS)
+                full = wb["所有单位岗位总表"]
+                filtered = wb["筛选后岗位表"]
+                self.assertEqual(filtered.freeze_panes, full.freeze_panes)
+                self.assertEqual(filtered["K2"].fill.fgColor.rgb, full["K2"].fill.fgColor.rgb)
+                headers = list(full.values)[0]
+                link_column = headers.index("投递链接") + 1
+                self.assertEqual(filtered.cell(2, link_column).hyperlink.target,
+                                 full.cell(2, link_column).hyperlink.target)
+                self.assertEqual(len(records(filtered)), 2)  # Both city rows, no extra position deduplication.
+            finally:
+                wb.close()
 
     def test_cli_round_trip_and_rule_hash_guard(self):
         with tempfile.TemporaryDirectory() as directory:

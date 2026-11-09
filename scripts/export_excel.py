@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate an evidence-backed recruitment audit and export exactly three Excel sheets.
+"""Validate an evidence-backed recruitment audit and export exactly four Excel sheets.
 
 This script does NOT browse, classify jobs, or infer employer application limits.
 Usage: python export_excel.py audit.json -o audit.xlsx [--overwrite]
@@ -22,7 +22,8 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-SHEETS = ["所有单位总览", "所有单位岗位总表", "其他信息表"]
+SHEETS = ["所有单位总览", "所有单位岗位总表", "其他信息表", "筛选后岗位表"]
+KEPT_RESULTS = {"纳入", "待核实"}
 RESULTS = {"纳入", "排除", "不纳入", "待核实"}
 JOB_STATUSES = {"在招", "已停止", "暂未开放", "待核实"}
 COMPANY_STATUSES = JOB_STATUSES | {"部分在招", "当前无岗位"}
@@ -425,6 +426,7 @@ def build_rows(data, grouped):
     info("统计口径", "总览与原表逐记录对齐", "公司名称和顺序以source_companies为准，一条非忽略源记录一行；子公司只在岗位明细和证据中展开，不合成“若干子公司”行。同名不同源记录不按名称合并；一个岗位关联多个重复源记录时，总览行之间不可直接相加。")
     info("统计口径", "独立投递身份", "相同 company_id + job_key 的多城市行只计一个岗位；官方独立岗位ID/志愿ID才可分开计数。各筛选结果计数可能因城市条件不同而重叠，不应相加。")
     info("统计口径", "最多可投 vs 招聘人数", "招聘人数不是限投岗位数；理论上限只对完整采集且已确认的独立单位限额计算，不扣历史已投，不保证个人资格；共享/分层额度不求和，不生成全局最大数。")
+    info("统计口径", "筛选后岗位表", "从所有单位岗位总表仅按最终筛选结果保留纳入/待核实（待审核）行，移除不纳入/排除；列、内容、多城市粒度及相对顺序完全保留。不额外按招聘状态或个人资格删除，不代表保证当前可投。")
     info("统计口径", "招聘状态与筛选结论相互独立", "历史停招岗位可仍有方向优先级，但不计入匹配在招数；访问失败不等于已停招，方向匹配不等于个人资格满足。")
     for ignored in run.get("ignored_records", []):
         info("源记录对账", ignored["record_id"], ignored["reason"])
@@ -487,7 +489,10 @@ def build_rows(data, grouped):
     for item in data["other_info"]:
         info(item["category"], item["item"], item["value"], item.get("company_id", ""), item.get("job_key", ""),
              item.get("source_url", ""), item.get("quote", ""), item.get("checked_at"), item.get("needs_review", False))
-    return [(overview_headers, overview), ([title for _, title in job_fields], job_rows), (info_headers, info_rows)]
+    job_headers = [title for _, title in job_fields]
+    filtered_rows = [row for job, row in zip(ordered, job_rows) if job["result"] in KEPT_RESULTS]
+    return [(overview_headers, overview), (job_headers, job_rows), (info_headers, info_rows),
+            (job_headers, filtered_rows)]
 
 
 def literal_cell(ws, row, column, value):
@@ -516,8 +521,9 @@ def export_audit(data, output, overwrite=False):
     output.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
     workbook.remove(workbook.active)
-    for index, (name, (headers, rows)) in enumerate(zip(SHEETS, tables)):
+    for name, (headers, rows) in zip(SHEETS, tables):
         ws = workbook.create_sheet(name)
+        is_job_sheet = name in {SHEETS[1], SHEETS[3]}
         for row_num, values in enumerate([headers] + rows, 1):
             for col_num, value in enumerate(values, 1):
                 cell = literal_cell(ws, row_num, col_num, value)
@@ -526,9 +532,9 @@ def export_audit(data, output, overwrite=False):
                     cell.font = Font(color="FFFFFF", bold=True, size=10)
             if row_num > 1:
                 color = None
-                if index == 0:
+                if name == SHEETS[0]:
                     color = "FCE4D6" if "全部" in str(values[4]) else ("FFF2CC" if values[3] != "完整" else None)
-                elif index == 1:
+                elif is_job_sheet:
                     color = COLORS.get(values[10])
                     if values[9] != "在招" or values[21] == "不符":
                         color = "E7E6E6" if values[9] != "待核实" else "FFF2CC"
@@ -537,7 +543,7 @@ def export_audit(data, output, overwrite=False):
                 if color:
                     for cell in ws[row_num]:
                         cell.fill = PatternFill("solid", fgColor=color)
-        ws.freeze_panes = ["C2", "F2", "D2"][index]
+        ws.freeze_panes = "F2" if is_job_sheet else "C2" if name == SHEETS[0] else "D2"
         ws.auto_filter.ref = ws.dimensions
         ws.sheet_view.zoomScale = 85
         ws.row_dimensions[1].height = 42
@@ -575,7 +581,8 @@ def export_audit(data, output, overwrite=False):
         workbook.close()
         Path(temp_name).unlink(missing_ok=True)
     return {"output": str(output), "companies": len(tables[0][1]), "audit_subjects": len(data["companies"]), "job_city_rows": len(data["jobs"]),
-            "unique_positions": len({(j["company_id"], j["job_key"]) for j in data["jobs"]}), "sheets": SHEETS}
+            "unique_positions": len({(j["company_id"], j["job_key"]) for j in data["jobs"]}),
+            "filtered_job_city_rows": len(tables[3][1]), "sheets": SHEETS}
 
 
 def main():
