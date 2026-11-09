@@ -15,6 +15,22 @@
     "city_exclusion_priorities": ["T2"],
     "notes": "本文件所有单位、岗位、证据、日期、规则路径和哈希均为虚构测试数据。实际任务不得沿用。"
   },
+  "source_companies": [
+    {
+      "source_record_id": "rec-fictional-a",
+      "name": "示例甲公司（虚构）",
+      "source_url": "https://example.invalid/feishu/rec-fictional-a",
+      "coverage": "完整",
+      "checked_at": "2026-10-28T15:30:00+08:00"
+    },
+    {
+      "source_record_id": "rec-fictional-b",
+      "name": "示例乙公司（虚构）",
+      "source_url": "https://example.invalid/feishu/rec-fictional-b",
+      "coverage": "完整",
+      "checked_at": "2026-10-28T15:30:00+08:00"
+    }
+  ],
   "companies": [
     {
       "company_id": "example-a",

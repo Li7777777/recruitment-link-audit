@@ -141,7 +141,7 @@ lark-cli sheets +workbook-info --url "<电子表格链接>" --as user
 
 ## 6. 接入审计结果及失败回退
 
-- 将已验证的 record_id/稳定行键填入 run.source_record_ids，按主 Skill 归并或展开到 companies.source_record_ids；说明行附理由忽略。
+- 将已验证的record_id/稳定行键填入run.source_record_ids，并按原视图顺序记录source_companies中的公司原名、记录ID和整体覆盖率；说明行附理由忽略。内部核验可展开子公司并关联companies.source_record_ids，但总览仍一条原表公司记录一行，不添加子公司统计项。
 - 在 run.notes 或 other_info 记录“采集渠道=lark-cli”、CLI版本、身份类型 user/bot、范围/分页/版本一致性摘要和非敏感本地证据路径；不记录姓名、open_id、授权链接或凭证。
 - 原始 NDJSON、manifest、字段/视图响应均可能含私有表标识和业务数据，只存私有工作目录，不提交到 Git 或复制进全局 Skill。
 - 访问失败、缺scope、资源ACL不允许、版本不支持、不能证明视图过滤等，标明具体原因；可用时回退用户已有权限的浏览器或其他只读渠道，不切身份、不扩大范围、不把失败判为停招。

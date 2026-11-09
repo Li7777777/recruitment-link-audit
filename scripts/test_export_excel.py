@@ -152,8 +152,10 @@ class ExportTests(unittest.TestCase):
             export_audit(data, path)
             wb = load_workbook(path)
             try:
-                self.assertEqual(len(records(wb[SHEETS[0]])), 3)
-                self.assertIn("部分完成", records(wb[SHEETS[2]])[0]["内容"])
+                self.assertEqual(len(records(wb[SHEETS[0]])), 2)  # Only actual source-table company entries.
+                info = records(wb[SHEETS[2]])
+                self.assertTrue(any(row["类别"] == "未找到的指定单位" and row["事项"] == missing["name"] for row in info))
+                self.assertIn("部分完成", info[0]["内容"])
             finally:
                 wb.close()
 
@@ -214,6 +216,7 @@ class ExportTests(unittest.TestCase):
 
     def test_empty_audit_keeps_all_three_headers(self):
         data = fixture()
+        data["source_companies"] = []
         data["companies"] = []
         data["jobs"] = []
         data["run"]["source_record_ids"] = []
