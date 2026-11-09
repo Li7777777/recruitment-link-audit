@@ -42,6 +42,7 @@ python -c "import hashlib,pathlib; p=pathlib.Path(r'<用户规则绝对路径>')
 | priority_order | 必填字符串数组，从高到低，按本次规则，如 ["T0","T1","T2","T3"]；不是脚本内置等级 |
 | city_priority_order | 必填字符串数组，独立城市等级从高到低；随附规则为 ["T0","T1","T2"]，不设置城市T3；其他规则按其定义，未设城市等级时为 [] |
 | city_exclusion_priorities | 可选字符串数组，默认[]，必须属于city_priority_order；随附规则为["T2"]，只有用户明确设定的等级才作为硬性地域排除 |
+| exclude_doctorate_required | 可选布尔值，默认false；选择随附规则时为true，明确博士必需岗位必须最终排除；不能把“博士优先”机械当成必需 |
 | notes | 可选，本轮限制/快照路径等 |
 
 `source_record_ids` 必须恰好等于所有 company.source_record_ids 与 ignored_records.record_id 的并集。可一源行展开多个单位，但不能把同一行同时映射和忽略，不能混入范围外行。只存在于用户单位名单而源表未找到的单位可用空来源 ID。
@@ -172,6 +173,8 @@ status 为在招/部分在招，至少有一条该单位的 job.status=在招；
 - result=待核实或status=待核实：`uncertainties`或`blocking_issues`至少有一项具体说明。
 - city_priority=待核实时，uncertainties/nonblocking_notes/blocking_issues至少一项说明地点缺失。无地域排除策略时，地点缺失通常不阻断；启用city_exclusion_priorities后，未知/空城市等级不能最终纳入，可保留direction_result=纳入及priority、将result设待核实并说明blocking_issues。
 - city_priority命中run.city_exclusion_priorities时，result必须为排除，并填写blacklist_reason说明地域原因；即使方向T0也不计候选。同岗多城市仅排除命中的城市行，保留其他有效城市，job_key仍共用。
+- run.exclude_doctorate_required=true且doctorate_requirement=必需时，result必须为排除，并在blacklist_reason记录博士最低门槛；即使已知方向T0也不豁免。方向可通过direction_result保留，城市照常独立评级，不进入筛选后岗位表。
+- doctorate_requirement=必需或待核实时，doctorate_evidence必须引用明确门槛或真实冲突。开启本黑名单且门槛待核实时，不能最终纳入；若方向已匹配，可保留方向并设result待核实、填写blocking_issues。未评估/字段缺失不会自动判博士必需或自动阻断；识别博士必需由Agent依据语义完成，不对education字段机械做关键词搜索。
 
 其他可选字段（建议尽可能依据原文填充，不得猜）：
 
@@ -180,6 +183,8 @@ status 为在招/部分在招，至少有一条该单位的 job.status=在招；
 | direction_result | 方向判断，未提供时等于result；仅明确匹配方向才有岗位priority |
 | classification_basis | 岗位名称 / 岗位职责 / 招聘专业 / 综合；名称直判要如实填写 |
 | classification_confidence | 高 / 中 / 低；不是自动复核开关，名称直判通常为中 |
+| doctorate_requirement | 必需 / 非必需 / 待核实 / 未评估；缺省未评估。最低博士/仅博士/PhD required为必需；博士优先、硕士及以上、本硕博均可等允许非博士的为非必需 |
+| doctorate_evidence | 博士是否必需的原文/冲突说明；必需/真实待核实时必填。可引用名称、学历字段、任职要求或适用公告，不是用户个人学历 |
 | blocking_issues | 真实影响最终筛选/当前可投性的阻断事项，字符串；方向已知但最终待核实时必填 |
 | nonblocking_notes | 非阻断补充信息，如仅缺完整JD/地点、未确认更高等级等；不逐项自动标红 |
 | job_id | 官网岗位/志愿 ID，保留原值；无则空 |

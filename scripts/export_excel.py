@@ -32,6 +32,7 @@ ELIGIBILITIES = {"符合已知条件", "不符", "待核实", "未评估"}
 QUOTA_STATUSES = {"已确认", "未核实", "冲突"}
 CLASSIFICATION_BASES = {"岗位名称", "岗位职责", "招聘专业", "综合"}
 CONFIDENCES = {"高", "中", "低"}
+DOCTORATE_REQUIREMENTS = {"必需", "非必需", "待核实", "未评估"}
 BAD_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 COLORS = {"纳入": "E2F0D9", "排除": "FCE4D6", "不纳入": "E7E6E6", "待核实": "FFF2CC"}
 
@@ -105,6 +106,8 @@ def validate(data):
     require(re.fullmatch(r"[0-9a-fA-F]{64}", run["rules_sha256"]) is not None, "run.rules_sha256: 应为 SHA-256")
     for field in ["priority_order", "city_priority_order", "source_record_ids"]:
         string_ids(run.get(field), f"run.{field}")
+    require(type(run.get("exclude_doctorate_required", False)) is bool,
+            "run.exclude_doctorate_required: 必须为布尔值")
     city_exclusions = run.get("city_exclusion_priorities", [])
     string_ids(city_exclusions, "run.city_exclusion_priorities")
     require(all(rank in run["city_priority_order"] for rank in city_exclusions),
@@ -202,7 +205,16 @@ def validate(data):
             require(job["result"] == "排除", f"{jid}: 命中城市排除规则，最终结果必须排除")
         if city_exclusions and job.get("city_priority", "") in {"", "待核实"}:
             require(job["result"] != "纳入", f"{jid}: 已启用地域排除，地点未核实不能最终纳入；可保留方向等级")
-        for field in ["blocking_issues", "nonblocking_notes"]:
+        doctorate = job.get("doctorate_requirement", "未评估")
+        require(doctorate in DOCTORATE_REQUIREMENTS, f"{jid}: 无效 doctorate_requirement")
+        if doctorate in {"必需", "待核实"}:
+            nonempty(job, ["doctorate_evidence"], jid)
+        if run.get("exclude_doctorate_required"):
+            if doctorate == "必需":
+                require(job["result"] == "排除", f"{jid}: 明确博士必需，最终结果必须排除")
+            elif doctorate == "待核实":
+                require(job["result"] != "纳入", f"{jid}: 博士门槛存在真实歧义，不能最终纳入；保留已知方向")
+        for field in ["blocking_issues", "nonblocking_notes", "doctorate_evidence"]:
             require(isinstance(job.get(field, ""), str), f"{jid}.{field}: 应为字符串")
         if job.get("classification_basis"):
             require(job["classification_basis"] in CLASSIFICATION_BASES, f"{jid}: 无效 classification_basis")
@@ -390,7 +402,8 @@ def build_rows(data, grouped):
                   ("direction_result", "方向判断"), ("classification_basis", "判断依据类型"),
                   ("classification_confidence", "判断置信度"), ("blocking_issues", "阻断事项"),
                   ("nonblocking_notes", "非阻断补充说明"), ("source_company_name", "原表公司名称"),
-                  ("source_record_ids", "原表记录ID")]
+                  ("source_record_ids", "原表记录ID"), ("doctorate_requirement", "博士是否必需"),
+                  ("doctorate_evidence", "博士门槛依据")]
     priorities = {p: i for i, p in enumerate(run["priority_order"])}
     cities = {p: i for i, p in enumerate(run["city_priority_order"])}
     fallback = len(priorities)
@@ -401,7 +414,8 @@ def build_rows(data, grouped):
     job_rows = [[companies[j["company_id"]]["name"] if key == "company_name" else
                  "; ".join(source_names[rid] for rid in companies[j["company_id"]]["source_record_ids"]) if key == "source_company_name" else
                  "; ".join(companies[j["company_id"]]["source_record_ids"]) if key == "source_record_ids" else
-                 j.get("direction_result", j["result"]) if key == "direction_result" else j.get(key, "")
+                 j.get("direction_result", j["result"]) if key == "direction_result" else
+                 j.get("doctorate_requirement", "未评估") if key == "doctorate_requirement" else j.get(key, "")
                  for key, _ in job_fields] for j in ordered]
     info_headers = ["类别", "单位ID", "岗位投递身份", "事项", "内容", "来源链接", "原文/证据", "核验时间", "需复核"]
     info_rows = []
@@ -416,6 +430,7 @@ def build_rows(data, grouped):
     for key, title in [("scope", "本次指定范围"), ("scope_verified", "视图/单位范围是否已核实"), ("scope_evidence", "范围核实依据"),
                        ("rules_file", "实际读取的规则文件"), ("rules_sha256", "规则文件 SHA-256"), ("priority_order", "岗位优先级顺序"),
                        ("city_priority_order", "独立城市优先级顺序"), ("city_exclusion_priorities", "硬性排除的城市等级"),
+                       ("exclude_doctorate_required", "是否排除博士必需岗位"),
                        ("source_expected_records", "源视图预期记录数(非单位数)"),
                        ("notes", "运行说明")]:
         if key in run:
@@ -470,6 +485,9 @@ def build_rows(data, grouped):
         if (run.get("city_exclusion_priorities") and job["result"] == "待核实"
                 and job.get("city_priority", "") in {"", "待核实"}):
             blocking.append("实际工作地点未确认，无法排除地域黑名单")
+        if (run.get("exclude_doctorate_required") and job["result"] == "待核实"
+                and job.get("doctorate_requirement") == "待核实"):
+            blocking.append("博士是否为必需学历存在真实冲突/歧义")
         issue = "；".join(dict.fromkeys(blocking))
         signature = (job["company_id"], job["job_key"], issue)
         if issue and signature not in seen_issues:

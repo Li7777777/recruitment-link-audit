@@ -13,6 +13,7 @@
     "priority_order": ["T0", "T1", "T2", "T3"],
     "city_priority_order": ["T0", "T1", "T2"],
     "city_exclusion_priorities": ["T2"],
+    "exclude_doctorate_required": true,
     "notes": "本文件所有单位、岗位、证据、日期、规则路径和哈希均为虚构测试数据。实际任务不得沿用。"
   },
   "source_companies": [
@@ -107,6 +108,8 @@
       "application_url": "https://example.invalid/a/jobs/AGENT-001",
       "source_url": "https://example.invalid/a/jobs/AGENT-001",
       "checked_at": "2026-10-28T15:30:00+08:00",
+      "doctorate_requirement": "非必需",
+      "doctorate_evidence": "虚构：本科及以上",
       "notes": "虚构：与杭州行共用投递身份。"
     },
     {
@@ -139,6 +142,8 @@
       "application_url": "https://example.invalid/a/jobs/AGENT-001",
       "source_url": "https://example.invalid/a/jobs/AGENT-001",
       "checked_at": "2026-10-28T15:30:00+08:00",
+      "doctorate_requirement": "非必需",
+      "doctorate_evidence": "虚构：本科及以上",
       "notes": "虚构：与上海行共用投递身份。"
     },
     {
