@@ -94,7 +94,7 @@ class DoctorateExclusionTests(unittest.TestCase):
 
     def test_published_policy_defines_required_versus_preferred_boundary(self):
         rules = (ROOT / "岗位优先级.md").read_text(encoding="utf-8")
-        section = rules.split("### 4. 明确要求博士学历的岗位", 1)[1].split("## 五、", 1)[0]
+        section = rules.split("明确要求博士学历的岗位", 1)[1].split("## 五、", 1)[0]
         for text in ["直接排除", "博士及以上", "PhD required", "博士优先", "PhD preferred", "硕士及以上", "本硕博均可"]:
             self.assertIn(text, section)
         self.assertIs(fixture()["run"]["exclude_doctorate_required"], True)
